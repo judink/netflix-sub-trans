@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "Netflix Subtitle Translator",
+  "version": "1.0.0",
+  "description": "Translate Netflix subtitles using Gemini API with pre-translation for zero delay.",
+  "permissions": [
+    "storage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://*.netflix.com/*",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.netflix.com/*"],
+      "js": ["src/contentScript.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "matches": ["https://*.netflix.com/*"],
+      "resources": ["src/injector.js"]
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup.html",
+    "default_title": "Netflix Subtitle Translator"
+  },
+  "options_page": "src/options.html"
+}

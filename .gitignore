@@ -1,0 +1,14 @@
+# 참고용 코드
+sub-injector/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# 기타
+*.log
+*.zip

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+      padding: 16px;
+      width: 320px;
+      background: #1a1a1a;
+      color: #fff;
+    }
+    h1 {
+      font-size: 1rem;
+      margin: 0 0 12px 0;
+      color: #ffd54f;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      padding: 10px;
+      background: #2a2a2a;
+      border-radius: 6px;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #666;
+      flex-shrink: 0;
+    }
+    .status-dot.ready {
+      background: #4caf50;
+    }
+    .status-dot.loading {
+      background: #ffd54f;
+      animation: pulse 1s infinite;
+    }
+    .status-dot.error {
+      background: #ff6b6b;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .status-text {
+      font-size: 0.85rem;
+      color: #ccc;
+    }
+    .section-title {
+      font-size: 0.8rem;
+      color: #888;
+      margin: 16px 0 8px 0;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .subtitle-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-bottom: 12px;
+    }
+    .subtitle-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 12px;
+      background: #2a2a2a;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .subtitle-item:hover {
+      background: #333;
+    }
+    .subtitle-item.selected {
+      background: #3a3a3a;
+      border: 1px solid #ffd54f;
+    }
+    .subtitle-name {
+      font-size: 0.9rem;
+    }
+    .subtitle-code {
+      font-size: 0.75rem;
+      color: #888;
+      background: #333;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+    .no-subtitles {
+      padding: 20px;
+      text-align: center;
+      color: #666;
+      font-size: 0.85rem;
+      background: #2a2a2a;
+      border-radius: 6px;
+    }
+    .translate-btn {
+      width: 100%;
+      padding: 12px;
+      background: #ffd54f;
+      color: #1a1a1a;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      margin-bottom: 12px;
+    }
+    .translate-btn:hover {
+      background: #ffca28;
+    }
+    .translate-btn:disabled {
+      background: #444;
+      color: #888;
+      cursor: not-allowed;
+    }
+    .toggle-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+      padding: 10px 12px;
+      background: #2a2a2a;
+      border-radius: 6px;
+    }
+    .toggle-label {
+      font-size: 0.85rem;
+    }
+    .toggle {
+      position: relative;
+      width: 44px;
+      height: 24px;
+    }
+    .toggle input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+    .toggle-slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background: #444;
+      border-radius: 24px;
+      transition: 0.2s;
+    }
+    .toggle-slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background: #fff;
+      border-radius: 50%;
+      transition: 0.2s;
+    }
+    .toggle input:checked + .toggle-slider {
+      background: #ffd54f;
+    }
+    .toggle input:checked + .toggle-slider:before {
+      transform: translateX(20px);
+    }
+    .settings-link {
+      display: block;
+      text-align: center;
+      padding: 10px;
+      background: #333;
+      border-radius: 6px;
+      color: #ffd54f;
+      text-decoration: none;
+      font-size: 0.85rem;
+    }
+    .settings-link:hover {
+      background: #444;
+    }
+    .target-lang {
+      font-size: 0.75rem;
+      color: #ffd54f;
+      margin-top: 4px;
+    }
+    .clear-cache-btn {
+      width: 100%;
+      padding: 8px;
+      background: transparent;
+      border: 1px solid #444;
+      border-radius: 6px;
+      color: #888;
+      font-size: 0.8rem;
+      cursor: pointer;
+      margin-top: 8px;
+    }
+    .clear-cache-btn:hover {
+      background: #2a2a2a;
+      color: #ccc;
+    }
+  </style>
+</head>
+<body>
+  <h1>Netflix Subtitle Translator</h1>
+
+  <div class="status-row">
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">Netflix 페이지를 열어주세요</span>
+  </div>
+
+  <div class="section-title">번역할 자막 선택</div>
+  <div class="subtitle-list" id="subtitleList">
+    <div class="no-subtitles">자막을 찾는 중...</div>
+  </div>
+
+  <button class="translate-btn" id="translateBtn" disabled>번역 시작</button>
+
+  <div class="toggle-row">
+    <span class="toggle-label">자막 오버레이 표시</span>
+    <label class="toggle">
+      <input type="checkbox" id="enableToggle" checked>
+      <span class="toggle-slider"></span>
+    </label>
+  </div>
+
+  <a href="options.html" target="_blank" class="settings-link">설정 (API 키, 대상 언어)</a>
+
+  <button class="clear-cache-btn" id="clearCacheBtn">캐시 삭제</button>
+
+  <script src="popup.js"></script>
+</body>
+</html>
