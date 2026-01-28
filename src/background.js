@@ -24,8 +24,9 @@ const LANGUAGE_NAMES = {
 const tabTranslations = new Map();
 
 // 배치 번역 설정
-const BATCH_SIZE = 5;
+const BATCH_SIZE = 40;  // 한 번에 40개 자막 (안전한 최대치)
 const CONTEXT_SIZE = 2;
+const BATCH_DELAY = 30; // 배치 간 딜레이 (ms)
 
 // ============================================
 // 메시지 핸들러
@@ -214,7 +215,7 @@ Output format example:
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               contents: [{ parts: [{ text: prompt }] }],
-              generationConfig: { temperature: 0.1, maxOutputTokens: 4096 }
+              generationConfig: { temperature: 0.1, maxOutputTokens: 8192 }
             })
           }
         );
@@ -272,7 +273,7 @@ Output format example:
         sendToTab(tabId, Object.fromEntries(tabData.subtitles));
 
         // 딜레이
-        await sleep(100);
+        await sleep(BATCH_DELAY);
 
       } catch (err) {
         console.error("[NST] 배치 오류:", err);
