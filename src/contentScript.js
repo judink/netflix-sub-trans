@@ -21,6 +21,9 @@ let preTranslationProgress = { current: 0, total: 0 };
 let availableSubtitles = [];
 let currentMovieId = null;
 
+// 번역 데이터 로컬 저장 (service worker 종료 대비)
+let localTranslations = new Map();
+
 // 즉시 injector 주입 (document_start에서 실행되므로)
 injectScript();
 init();
@@ -71,11 +74,21 @@ function init() {
   });
 
   // 메시지 리스너
-  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === SUBTITLE_STATUS) {
       preTranslationStatus = message.status;
       if (message.progress) preTranslationProgress = message.progress;
       updateStatusIndicator();
+      sendResponse?.({ ok: true });
+    }
+
+    // background에서 번역 데이터 수신 (로컬에 저장)
+    if (message?.type === "NST_TRANSLATIONS_DATA") {
+      const { translations } = message;
+      if (translations && typeof translations === "object") {
+        localTranslations = new Map(Object.entries(translations));
+        console.log("[NST] 번역 데이터 로컬 저장:", localTranslations.size + "개");
+      }
       sendResponse?.({ ok: true });
     }
 
@@ -309,18 +322,27 @@ function readNetflixSubtitle() {
 }
 
 // ============================================
-// 번역 요청 (background에서 조회)
+// 번역 요청 (로컬 우선, 없으면 background 조회)
 // ============================================
 function requestTranslation(text) {
+  // 로컬에서 먼저 조회 (service worker 종료 대비)
+  if (localTranslations.has(text)) {
+    showOverlay(localTranslations.get(text));
+    return;
+  }
+
+  // 로컬에 없으면 background에 요청 (service worker가 살아있을 때)
   chrome.runtime.sendMessage(
     { type: GET_TRANSLATION, text },
     (response) => {
       if (chrome.runtime.lastError) {
-        console.warn("[NST] 메시지 오류:", chrome.runtime.lastError.message);
+        // service worker 종료됨 - 로컬 데이터만 사용
         return;
       }
 
       if (response?.translated) {
+        // 로컬에도 저장
+        localTranslations.set(text, response.translated);
         showOverlay(response.translated);
       } else {
         hideOverlay();

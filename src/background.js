@@ -140,6 +140,9 @@ async function handleSubtitleProcessing(movieId, subtitleUrl, tabId, sourceLangu
       progress: { current: subtitlesMap.size, total: subtitlesMap.size }
     });
 
+    // contentScript에 번역 데이터 전송 (service worker 종료 대비)
+    sendTranslationsToTab(tabId, cached.subtitles);
+
     notifyStatus(tabId, "ready", null, subtitlesMap.size);
     return;
   }
@@ -205,6 +208,10 @@ async function fetchAndTranslateSubtitles(movieId, url, tabId, sourceLanguage, t
 
     // 캐시에 저장
     await saveToCache(movieId, sourceLanguage, targetLanguage, tabData.subtitles);
+
+    // contentScript에 번역 데이터 전송 (service worker 종료 대비)
+    const translationsObj = Object.fromEntries(tabData.subtitles);
+    sendTranslationsToTab(tabId, translationsObj);
 
     notifyStatus(tabId, "ready", null, tabData.subtitles.size);
 
@@ -395,6 +402,16 @@ function notifyStatus(tabId, status, progress = null, count = null) {
     status,
     progress,
     count
+  }).catch(() => {});
+}
+
+// ============================================
+// 번역 데이터를 contentScript로 전송 (service worker 종료 대비)
+// ============================================
+function sendTranslationsToTab(tabId, translations) {
+  chrome.tabs.sendMessage(tabId, {
+    type: "NST_TRANSLATIONS_DATA",
+    translations
   }).catch(() => {});
 }
 
