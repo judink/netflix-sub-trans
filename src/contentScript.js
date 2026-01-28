@@ -24,6 +24,9 @@ let currentMovieId = null;
 // 번역 데이터 로컬 저장 (service worker 종료 대비)
 let localTranslations = new Map();
 
+// 리셋 후 상태 업데이트 무시 플래그
+let ignoreStatusUpdates = false;
+
 // 즉시 injector 주입 (document_start에서 실행되므로)
 injectScript();
 init();
@@ -60,6 +63,35 @@ function init() {
     const { movieId, subtitles } = event.detail;
     console.log("[NST] 자막 발견 이벤트 수신:", movieId, subtitles.length + "개");
 
+    // 영상 변경 감지
+    if (currentMovieId && currentMovieId !== movieId) {
+      console.log("[NST] 영상 변경 감지:", currentMovieId, "→", movieId);
+
+      // 상태 업데이트 일시 무시
+      ignoreStatusUpdates = true;
+
+      // 이전 번역 취소 요청
+      chrome.runtime.sendMessage({
+        type: "NST_CANCEL_TRANSLATION",
+        movieId: movieId
+      }).catch(() => {});
+
+      // 로컬 상태 초기화
+      localTranslations.clear();
+      preTranslationStatus = "idle";
+      preTranslationProgress = { current: 0, total: 0 };
+
+      // UI 강제 숨김
+      hideOverlay();
+      hideStatusIndicator();
+
+      // 2초 후 상태 업데이트 다시 허용
+      setTimeout(() => {
+        ignoreStatusUpdates = false;
+        console.log("[NST] 영상 변경 리셋 완료");
+      }, 2000);
+    }
+
     // 자막 정보 저장 (번역은 하지 않음)
     currentMovieId = movieId;
     availableSubtitles = subtitles;
@@ -76,20 +108,33 @@ function init() {
   // 메시지 리스너
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === SUBTITLE_STATUS) {
+      // 리셋 후 상태 업데이트 무시 (번역 데이터는 계속 받음)
+      if (ignoreStatusUpdates) {
+        console.log("[NST] 상태 업데이트 무시 (리셋 중)");
+        sendResponse?.({ ok: true });
+        return true;
+      }
       preTranslationStatus = message.status;
       if (message.progress) preTranslationProgress = message.progress;
       updateStatusIndicator();
       sendResponse?.({ ok: true });
+      return true;
     }
 
-    // background에서 번역 데이터 수신 (로컬에 저장)
+    // background에서 번역 데이터 수신 (로컬에 저장) - ignoreStatusUpdates 무관하게 항상 받음
     if (message?.type === "NST_TRANSLATIONS_DATA") {
       const { translations } = message;
       if (translations && typeof translations === "object") {
-        localTranslations = new Map(Object.entries(translations));
-        console.log("[NST] 번역 데이터 로컬 저장:", localTranslations.size + "개");
+        // 리셋 중이 아닐 때만 저장
+        if (!ignoreStatusUpdates) {
+          localTranslations = new Map(Object.entries(translations));
+          console.log("[NST] 번역 데이터 로컬 저장:", localTranslations.size + "개");
+        } else {
+          console.log("[NST] 번역 데이터 무시 (리셋 중)");
+        }
       }
       sendResponse?.({ ok: true });
+      return true;
     }
 
     if (message?.type === "NST_SETTINGS_UPDATED") {
@@ -98,6 +143,41 @@ function init() {
         if (!isEnabled) hideOverlay();
       }
       sendResponse?.({ ok: true });
+      return true;
+    }
+
+    // 강제 리셋 요청 (팝업에서 "번역 중지 & 재인식" 클릭)
+    if (message?.type === "NST_FORCE_RESET") {
+      console.log("[NST] 강제 리셋 요청");
+
+      // 상태 업데이트 무시 시작
+      ignoreStatusUpdates = true;
+
+      // background에 취소 요청
+      chrome.runtime.sendMessage({
+        type: "NST_CANCEL_TRANSLATION",
+        movieId: "FORCE_RESET"
+      }).catch(() => {});
+
+      // 로컬 상태 완전 초기화
+      localTranslations.clear();
+      availableSubtitles = [];
+      currentMovieId = null;
+      preTranslationStatus = "idle";
+      preTranslationProgress = { current: 0, total: 0 };
+
+      // UI 강제 숨김
+      hideOverlay();
+      hideStatusIndicator();
+
+      // 3초 후 상태 업데이트 다시 허용
+      setTimeout(() => {
+        ignoreStatusUpdates = false;
+        console.log("[NST] 강제 리셋 완료");
+      }, 3000);
+
+      sendResponse?.({ ok: true });
+      return true;
     }
 
     // 팝업에서 사용 가능한 자막 요청
@@ -108,15 +188,25 @@ function init() {
         status: preTranslationStatus,
         progress: preTranslationProgress
       });
+      return true;
     }
 
     // 팝업에서 번역 시작 요청
     if (message?.type === START_TRANSLATION) {
       const { langCode } = message;
+      console.log("[NST] 번역 시작 요청:", langCode);
+      console.log("[NST] availableSubtitles:", availableSubtitles.length + "개");
+
       const subtitle = availableSubtitles.find(s => s.langCode === langCode);
 
       if (subtitle && currentMovieId) {
+        // 리셋 플래그 해제 (새 번역 시작)
+        ignoreStatusUpdates = false;
+
         console.log("[NST] 번역 시작:", subtitle.langName);
+        console.log("[NST] subtitleUrl:", subtitle.url?.substring(0, 100));
+        console.log("[NST] movieId:", currentMovieId);
+
         chrome.runtime.sendMessage({
           type: PROCESS_SUBTITLES,
           movieId: currentMovieId,
@@ -125,8 +215,10 @@ function init() {
         });
         sendResponse({ ok: true });
       } else {
+        console.log("[NST] 자막 찾기 실패 - subtitle:", !!subtitle, "movieId:", currentMovieId);
         sendResponse({ ok: false, error: "자막을 찾을 수 없습니다" });
       }
+      return true;
     }
 
     return true;
@@ -216,6 +308,12 @@ function setupOverlay() {
 function updateStatusIndicator() {
   if (!statusIndicator) return;
 
+  // 리셋 중이면 무조건 숨김
+  if (ignoreStatusUpdates) {
+    statusIndicator.className = "nst-status nst-hidden";
+    return;
+  }
+
   if (preTranslationStatus === "loading") {
     const percent = preTranslationProgress.total > 0
       ? Math.round((preTranslationProgress.current / preTranslationProgress.total) * 100)
@@ -234,6 +332,13 @@ function updateStatusIndicator() {
     statusIndicator.textContent = "번역 준비 실패";
     statusIndicator.className = "nst-status error";
   } else {
+    statusIndicator.className = "nst-status nst-hidden";
+  }
+}
+
+// 상태 표시기 강제 숨김
+function hideStatusIndicator() {
+  if (statusIndicator) {
     statusIndicator.className = "nst-status nst-hidden";
   }
 }
@@ -325,9 +430,16 @@ function readNetflixSubtitle() {
 // 번역 요청 (로컬 우선, 없으면 background 조회)
 // ============================================
 function requestTranslation(text) {
+  // 오버레이 비활성화 확인
+  if (!isEnabled) {
+    return;
+  }
+
   // 로컬에서 먼저 조회 (service worker 종료 대비)
   if (localTranslations.has(text)) {
-    showOverlay(localTranslations.get(text));
+    const translated = localTranslations.get(text);
+    console.log("[NST] 로컬 번역 발견:", text.substring(0, 20), "→", translated.substring(0, 20));
+    showOverlay(translated);
     return;
   }
 
@@ -337,15 +449,18 @@ function requestTranslation(text) {
     (response) => {
       if (chrome.runtime.lastError) {
         // service worker 종료됨 - 로컬 데이터만 사용
+        console.log("[NST] service worker 종료됨");
         return;
       }
 
       if (response?.translated) {
         // 로컬에도 저장
         localTranslations.set(text, response.translated);
+        console.log("[NST] background 번역 수신:", text.substring(0, 20), "→", response.translated.substring(0, 20));
         showOverlay(response.translated);
       } else {
-        hideOverlay();
+        // 번역 없음 - 오버레이 숨기지 않음 (번역 중일 수 있음)
+        console.log("[NST] 번역 없음 (아직 번역 안됨):", text.substring(0, 20));
       }
     }
   );

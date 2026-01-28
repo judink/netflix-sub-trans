@@ -205,6 +205,32 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
   }, 1000);
 
+  // 번역 중지 & 새로고침 버튼
+  const stopBtn = document.getElementById("stopBtn");
+  stopBtn.addEventListener("click", async () => {
+    if (!currentTabId) return;
+
+    stopBtn.disabled = true;
+    stopBtn.textContent = "새로고침 중...";
+
+    // background에 번역 취소 요청 (실패해도 무시)
+    chrome.runtime.sendMessage({
+      type: "NST_CANCEL_TRANSLATION",
+      movieId: "FORCE_RESET"
+    }).catch(() => {});
+
+    // Netflix 탭 새로고침 (0.5초 후)
+    setTimeout(() => {
+      chrome.tabs.reload(currentTabId).then(() => {
+        window.close();
+      }).catch((err) => {
+        console.error("Reload failed:", err);
+        // 실패해도 팝업 닫기
+        window.close();
+      });
+    }, 500);
+  });
+
   // 캐시 삭제 버튼
   const clearCacheBtn = document.getElementById("clearCacheBtn");
   clearCacheBtn.addEventListener("click", async () => {

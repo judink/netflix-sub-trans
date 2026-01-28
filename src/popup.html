@@ -122,6 +122,21 @@
       color: #888;
       cursor: not-allowed;
     }
+    .stop-btn {
+      width: 100%;
+      padding: 10px;
+      background: #ff5252;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-bottom: 12px;
+    }
+    .stop-btn:hover {
+      background: #ff1744;
+    }
     .toggle-row {
       display: flex;
       align-items: center;
@@ -237,6 +252,7 @@
   </div>
 
   <button class="translate-btn" id="translateBtn" disabled>번역 시작</button>
+  <button class="stop-btn" id="stopBtn">번역 중지 & 새로고침</button>
 
   <div class="toggle-row">
     <span class="toggle-label">자막 오버레이 표시</span>

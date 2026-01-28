@@ -5,7 +5,8 @@
   "description": "Translate Netflix subtitles using Gemini API with pre-translation for zero delay.",
   "permissions": [
     "storage",
-    "activeTab"
+    "activeTab",
+    "tabs"
   ],
   "host_permissions": [
     "https://*.netflix.com/*",
