@@ -5,6 +5,7 @@ const START_TRANSLATION = "NST_START_TRANSLATION";
 
 let selectedLangCode = null;
 let currentTabId = null;
+let currentMovieId = null;
 
 document.addEventListener("DOMContentLoaded", async () => {
   const statusDot = document.getElementById("statusDot");
@@ -15,6 +16,7 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // 설정 로드
   const settings = await chrome.storage.sync.get(["nstEnabled", "geminiApiKey", "targetLanguage"]);
+  const targetLang = settings.targetLanguage || "uk";
   enableToggle.checked = settings.nstEnabled !== false;
 
   // API 키 체크
@@ -42,7 +44,8 @@ document.addEventListener("DOMContentLoaded", async () => {
     const response = await chrome.tabs.sendMessage(tab.id, { type: GET_AVAILABLE_SUBTITLES });
 
     if (response && response.subtitles && response.subtitles.length > 0) {
-      renderSubtitles(response.subtitles, settings.targetLanguage || "uk");
+      currentMovieId = response.movieId;
+      await renderSubtitles(response.subtitles, targetLang, response.movieId);
       updateStatus(response.status, response.progress);
     } else {
       subtitleList.innerHTML = '<div class="no-subtitles">영상을 재생하면 자막이 표시됩니다</div>';
@@ -56,7 +59,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     statusText.textContent = "자막 대기 중";
   }
 
-  function renderSubtitles(subtitles, targetLang) {
+  async function renderSubtitles(subtitles, targetLang, movieId) {
     subtitleList.innerHTML = "";
 
     const targetLangNames = {
@@ -64,36 +67,63 @@ document.addEventListener("DOMContentLoaded", async () => {
       ru: "러시아어", es: "스페인어", fr: "프랑스어", de: "독일어", zh: "중국어"
     };
 
-    subtitles.forEach(sub => {
+    for (const sub of subtitles) {
       const item = document.createElement("div");
       item.className = "subtitle-item";
       item.dataset.langCode = sub.langCode;
 
+      // 캐시 상태 확인
+      let cacheStatus = { exists: false, progress: 0, completed: false };
+      try {
+        cacheStatus = await chrome.runtime.sendMessage({
+          type: "NST_GET_CACHE_STATUS",
+          movieId,
+          langCode: sub.langCode,
+          targetLang
+        });
+      } catch (e) {
+        // 무시
+      }
+
+      // 상태 배지 생성
+      let statusBadge = "";
+      if (cacheStatus.completed) {
+        statusBadge = '<span class="cache-badge complete">완료</span>';
+      } else if (cacheStatus.exists && cacheStatus.progress > 0) {
+        statusBadge = `<span class="cache-badge partial">${cacheStatus.progress}%</span>`;
+      }
+
       item.innerHTML = `
         <div>
-          <div class="subtitle-name">${sub.langName}</div>
+          <div class="subtitle-name">${sub.langName} ${statusBadge}</div>
           <div class="target-lang">→ ${targetLangNames[targetLang] || targetLang}로 번역</div>
         </div>
         <span class="subtitle-code">${sub.langCode}</span>
       `;
 
       item.addEventListener("click", () => {
-        // 선택 상태 토글
         document.querySelectorAll(".subtitle-item").forEach(el => el.classList.remove("selected"));
         item.classList.add("selected");
         selectedLangCode = sub.langCode;
         translateBtn.disabled = false;
+
+        // 완료된 캐시면 버튼 텍스트 변경
+        if (cacheStatus.completed) {
+          translateBtn.textContent = "번역 불러오기";
+        } else if (cacheStatus.exists && cacheStatus.progress > 0) {
+          translateBtn.textContent = `이어서 번역 (${cacheStatus.progress}%)`;
+        } else {
+          translateBtn.textContent = "번역 시작";
+        }
       });
 
       subtitleList.appendChild(item);
-    });
+    }
 
     // 첫 번째 자막 자동 선택
     if (subtitles.length > 0) {
       const firstItem = subtitleList.querySelector(".subtitle-item");
-      firstItem.classList.add("selected");
-      selectedLangCode = subtitles[0].langCode;
-      translateBtn.disabled = false;
+      firstItem.click();
     }
   }
 
@@ -110,7 +140,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       statusDot.className = "status-dot ready";
       statusText.textContent = "번역 완료!";
       translateBtn.textContent = "다른 자막 번역";
-      translateBtn.disabled = false; // 다른 자막도 번역할 수 있게
+      translateBtn.disabled = false;
     } else if (status === "error") {
       statusDot.className = "status-dot error";
       statusText.textContent = "번역 실패";
@@ -187,14 +217,10 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (cacheKeys.length > 0) {
       await chrome.storage.local.remove(cacheKeys);
       alert(`${cacheKeys.length}개 캐시 삭제 완료`);
+      // 팝업 새로고침
+      window.location.reload();
     } else {
       alert("삭제할 캐시가 없습니다");
     }
-
-    // 상태 초기화
-    statusDot.className = "status-dot";
-    statusText.textContent = "캐시 삭제됨";
-    translateBtn.textContent = "번역 시작";
-    translateBtn.disabled = !selectedLangCode;
   });
 });

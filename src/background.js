@@ -51,9 +51,9 @@ async function loadFromCache(movieId, sourceLang, targetLang) {
 }
 
 // ============================================
-// 캐시에 번역 저장
+// 캐시에 번역 저장 (진행률 포함)
 // ============================================
-async function saveToCache(movieId, sourceLang, targetLang, subtitlesMap) {
+async function saveToCache(movieId, sourceLang, targetLang, subtitlesMap, progress = null, completed = true) {
   const key = getCacheKey(movieId, sourceLang, targetLang);
 
   // Map을 일반 객체로 변환
@@ -68,11 +68,35 @@ async function saveToCache(movieId, sourceLang, targetLang, subtitlesMap) {
       timestamp: Date.now(),
       movieId,
       sourceLang,
-      targetLang
+      targetLang,
+      progress: progress || { current: Object.keys(subtitlesObj).length, total: Object.keys(subtitlesObj).length },
+      completed
     }
   });
 
-  console.log("[NST] 캐시에 저장:", movieId, Object.keys(subtitlesObj).length + "개");
+  console.log("[NST] 캐시에 저장:", movieId, Object.keys(subtitlesObj).length + "개", completed ? "(완료)" : "(진행중)");
+}
+
+// ============================================
+// 캐시 상태 조회 (팝업용)
+// ============================================
+async function getCacheStatus(movieId, sourceLang, targetLang) {
+  const cached = await loadFromCache(movieId, sourceLang, targetLang);
+  if (!cached) {
+    return { exists: false, progress: 0, completed: false };
+  }
+
+  const total = cached.progress?.total || Object.keys(cached.subtitles).length;
+  const current = Object.keys(cached.subtitles).length;
+  const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+
+  return {
+    exists: true,
+    progress: percent,
+    completed: cached.completed === true,
+    current,
+    total
+  };
 }
 
 // ============================================
@@ -85,12 +109,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === PROCESS_SUBTITLES) {
     const { movieId, subtitleUrl, langCode } = message;
 
-    // 이미 이 세션에서 처리된 영화인지 확인 (같은 언어로)
+    // 현재 진행 중인 번역이 있는지 확인 (중복 요청 방지)
     const sessionKey = `${tabId}-${movieId}-${langCode}`;
     if (processedMovies.has(sessionKey)) {
-      console.log("[NST] 이미 처리된 영화:", movieId, langCode);
-      sendResponse({ ok: true });
-      return true;
+      // 이미 진행 중이면 스킵 (하지만 캐시 로드는 허용해야 하므로 상태 확인)
+      const tabData = tabTranslations.get(tabId);
+      if (tabData && tabData.status === "loading") {
+        console.log("[NST] 이미 번역 진행 중:", movieId, langCode);
+        sendResponse({ ok: true });
+        return true;
+      }
+      // loading 상태가 아니면 다시 처리 허용 (캐시 로드 등)
+      processedMovies.delete(sessionKey);
     }
     processedMovies.add(sessionKey);
 
@@ -114,10 +144,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
     return true;
   }
+
+  // 캐시 상태 조회 (팝업에서 호출)
+  if (message?.type === "NST_GET_CACHE_STATUS") {
+    const { movieId, langCode, targetLang } = message;
+    getCacheStatus(movieId, langCode, targetLang).then(status => {
+      sendResponse(status);
+    });
+    return true;
+  }
 });
 
 // ============================================
-// 자막 처리 (캐시 확인 → 번역)
+// 자막 처리 (캐시 확인 → 이어서 번역 또는 새로 번역)
 // ============================================
 async function handleSubtitleProcessing(movieId, subtitleUrl, tabId, sourceLanguage) {
   // 설정 가져오기
@@ -127,11 +166,10 @@ async function handleSubtitleProcessing(movieId, subtitleUrl, tabId, sourceLangu
   // 캐시 확인
   const cached = await loadFromCache(movieId, sourceLanguage, targetLanguage);
 
-  if (cached && cached.subtitles) {
-    // 캐시에서 로드!
-    console.log("[NST] ★ 캐시 히트! API 호출 생략");
+  if (cached && cached.subtitles && cached.completed === true) {
+    // 완료된 캐시 - 바로 로드!
+    console.log("[NST] ★ 캐시 히트! (완료된 번역)");
 
-    // Map으로 변환하여 메모리에 저장
     const subtitlesMap = new Map(Object.entries(cached.subtitles));
 
     tabTranslations.set(tabId, {
@@ -140,33 +178,39 @@ async function handleSubtitleProcessing(movieId, subtitleUrl, tabId, sourceLangu
       progress: { current: subtitlesMap.size, total: subtitlesMap.size }
     });
 
-    // contentScript에 번역 데이터 전송 (service worker 종료 대비)
     sendTranslationsToTab(tabId, cached.subtitles);
-
     notifyStatus(tabId, "ready", null, subtitlesMap.size);
     return;
   }
 
-  // 캐시 없음 - 새로 번역
-  console.log("[NST] 캐시 미스, 새로 번역 시작");
-  await fetchAndTranslateSubtitles(movieId, subtitleUrl, tabId, sourceLanguage, targetLanguage, settings.geminiApiKey);
+  // 미완료 캐시가 있으면 이어서 번역, 없으면 새로 시작
+  const existingSubtitles = cached?.subtitles ? new Map(Object.entries(cached.subtitles)) : new Map();
+  const existingProgress = cached?.progress || null;
+
+  if (existingSubtitles.size > 0) {
+    console.log("[NST] ★ 미완료 캐시 발견, 이어서 번역:", existingSubtitles.size + "개 완료됨");
+  } else {
+    console.log("[NST] 캐시 없음, 새로 번역 시작");
+  }
+
+  await fetchAndTranslateSubtitles(movieId, subtitleUrl, tabId, sourceLanguage, targetLanguage, settings.geminiApiKey, existingSubtitles, existingProgress);
 }
 
 // ============================================
-// 자막 파일 가져오기 + 번역
+// 자막 파일 가져오기 + 번역 (이어서 번역 지원)
 // ============================================
-async function fetchAndTranslateSubtitles(movieId, url, tabId, sourceLanguage, targetLanguage, apiKey) {
+async function fetchAndTranslateSubtitles(movieId, url, tabId, sourceLanguage, targetLanguage, apiKey, existingSubtitles = new Map(), existingProgress = null) {
   if (!tabId || tabId < 0) return;
 
   try {
-    // 상태 초기화
+    // 상태 초기화 (기존 번역 유지)
     tabTranslations.set(tabId, {
-      subtitles: new Map(),
+      subtitles: existingSubtitles,
       status: "loading",
-      progress: { current: 0, total: 0 }
+      progress: { current: existingSubtitles.size, total: existingProgress?.total || 0 }
     });
 
-    notifyStatus(tabId, "loading", { current: 0, total: 0 });
+    notifyStatus(tabId, "loading", { current: existingSubtitles.size, total: existingProgress?.total || 0 });
 
     // API 키 확인
     if (!apiKey) {
@@ -199,15 +243,20 @@ async function fetchAndTranslateSubtitles(movieId, url, tabId, sourceLanguage, t
     const tabData = tabTranslations.get(tabId);
     tabData.progress.total = entries.length;
 
-    // 배치 번역 실행
-    await translateBatch(tabId, entries, sourceLanguage, targetLanguage, apiKey);
+    // 이미 번역된 항목 로드 후 contentScript에 전송
+    if (existingSubtitles.size > 0) {
+      sendTranslationsToTab(tabId, Object.fromEntries(existingSubtitles));
+    }
+
+    // 배치 번역 실행 (movieId 전달하여 중간 저장)
+    await translateBatch(tabId, entries, sourceLanguage, targetLanguage, apiKey, movieId);
 
     // 완료
     tabData.status = "ready";
     console.log(`[NST] 번역 완료: ${tabData.subtitles.size}개`);
 
-    // 캐시에 저장
-    await saveToCache(movieId, sourceLanguage, targetLanguage, tabData.subtitles);
+    // 캐시에 완료 상태로 저장
+    await saveToCache(movieId, sourceLanguage, targetLanguage, tabData.subtitles, tabData.progress, true);
 
     // contentScript에 번역 데이터 전송 (service worker 종료 대비)
     const translationsObj = Object.fromEntries(tabData.subtitles);
@@ -276,9 +325,9 @@ function parseWebVTT(vttText) {
 }
 
 // ============================================
-// 배치 번역
+// 배치 번역 (이어서 번역 + 중간 저장)
 // ============================================
-async function translateBatch(tabId, entries, sourceLanguage, targetLanguage, apiKey) {
+async function translateBatch(tabId, entries, sourceLanguage, targetLanguage, apiKey, movieId) {
   const tabData = tabTranslations.get(tabId);
   if (!tabData) return;
 
@@ -287,6 +336,16 @@ async function translateBatch(tabId, entries, sourceLanguage, targetLanguage, ap
 
   for (let i = 0; i < entries.length; i += BATCH_SIZE) {
     const batch = entries.slice(i, i + BATCH_SIZE);
+
+    // 이미 번역된 항목 필터링
+    const toTranslate = batch.filter(text => !tabData.subtitles.has(text));
+
+    if (toTranslate.length === 0) {
+      // 이 배치는 이미 모두 번역됨, 스킵
+      tabData.progress.current = Math.min(i + BATCH_SIZE, entries.length);
+      notifyStatus(tabId, "loading", tabData.progress);
+      continue;
+    }
 
     // 문맥 포함 프롬프트 생성
     const promptLines = [];
@@ -302,9 +361,9 @@ async function translateBatch(tabId, entries, sourceLanguage, targetLanguage, ap
       promptLines.push("");
     }
 
-    // 번역할 문장들
+    // 번역할 문장들 (아직 번역 안된 것만)
     promptLines.push("[TRANSLATE THESE]");
-    batch.forEach((t, idx) => promptLines.push(`${idx + 1}. "${t}"`));
+    toTranslate.forEach((t, idx) => promptLines.push(`${idx + 1}. "${t}"`));
     promptLines.push("");
 
     // 뒤 문맥 (CONTEXT_SIZE개)
@@ -351,9 +410,9 @@ ${promptLines.join("\n")}`;
       const resultText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
       const resultLines = resultText.split("\n").filter(l => l.trim());
 
-      // 결과 파싱
-      for (let j = 0; j < batch.length; j++) {
-        const original = batch[j];
+      // 결과 파싱 (toTranslate 기준)
+      for (let j = 0; j < toTranslate.length; j++) {
+        const original = toTranslate[j];
         let translated = "";
 
         // 번호 매칭 시도
@@ -382,6 +441,12 @@ ${promptLines.join("\n")}`;
 
       console.log(`[NST] 번역 진행: ${tabData.progress.current}/${entries.length}`);
 
+      // 중간 저장 (매 배치마다)
+      await saveToCache(movieId, sourceLanguage, targetLanguage, tabData.subtitles, tabData.progress, false);
+
+      // contentScript에도 업데이트 (실시간 반영)
+      sendTranslationsToTab(tabId, Object.fromEntries(tabData.subtitles));
+
       // 배치 간 딜레이
       if (i + BATCH_SIZE < entries.length) {
         await sleep(BATCH_DELAY);
@@ -389,6 +454,8 @@ ${promptLines.join("\n")}`;
 
     } catch (err) {
       console.error("[NST] 배치 오류:", err);
+      // 오류 발생해도 지금까지 번역된 것 저장
+      await saveToCache(movieId, sourceLanguage, targetLanguage, tabData.subtitles, tabData.progress, false);
     }
   }
 }
