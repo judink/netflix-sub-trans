@@ -3,21 +3,19 @@
 
 document.addEventListener("DOMContentLoaded", () => {
   const apiKeyInput = document.getElementById("apiKey");
-  const sourceLanguageSelect = document.getElementById("sourceLanguage");
   const targetLanguageSelect = document.getElementById("targetLanguage");
   const enabledInput = document.getElementById("enabled");
   const saveButton = document.getElementById("save");
   const statusEl = document.getElementById("status");
 
+  chrome.storage.sync.remove("sourceLanguage");
+
   // 설정 로드
   chrome.storage.sync.get(
-    ["geminiApiKey", "sourceLanguage", "targetLanguage", "nstEnabled"],
+    ["geminiApiKey", "targetLanguage", "nstEnabled"],
     (result) => {
       if (result.geminiApiKey) {
         apiKeyInput.value = result.geminiApiKey;
-      }
-      if (result.sourceLanguage) {
-        sourceLanguageSelect.value = result.sourceLanguage;
       }
       if (result.targetLanguage) {
         targetLanguageSelect.value = result.targetLanguage;
@@ -32,7 +30,6 @@ document.addEventListener("DOMContentLoaded", () => {
   saveButton.addEventListener("click", () => {
     const settings = {
       geminiApiKey: apiKeyInput.value.trim(),
-      sourceLanguage: sourceLanguageSelect.value,
       targetLanguage: targetLanguageSelect.value,
       nstEnabled: enabledInput.checked
     };

@@ -10,6 +10,9 @@
   ],
   "host_permissions": [
     "https://*.netflix.com/*",
+    "https://*.nflxvideo.net/*",
+    "https://*.nflxso.net/*",
+    "https://*.nflxext.com/*",
     "https://generativelanguage.googleapis.com/*"
   ],
   "background": {

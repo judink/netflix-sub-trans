@@ -20,6 +20,8 @@ let preTranslationProgress = { current: 0, total: 0 };
 // 발견된 자막 저장 (자동 번역 안함)
 let availableSubtitles = [];
 let currentMovieId = null;
+let currentWatchId = getWatchIdFromUrl();
+let resetTimer = null;
 
 // 번역 데이터 로컬 저장 (service worker 종료 대비)
 let localTranslations = new Map();
@@ -35,13 +37,19 @@ init();
 // Injector 스크립트 주입
 // ============================================
 function injectScript() {
-  const script = document.createElement("script");
-  script.src = chrome.runtime.getURL("src/injector.js");
-  script.onload = function() {
-    this.remove();
-  };
-  (document.head || document.documentElement).appendChild(script);
-  console.log("[NST] Injector 주입 완료");
+  try {
+    if (!isExtensionContextReady()) return;
+
+    const script = document.createElement("script");
+    script.src = chrome.runtime.getURL("src/injector.js");
+    script.onload = function() {
+      this.remove();
+    };
+    (document.head || document.documentElement).appendChild(script);
+    console.log("[NST] Injector 주입 완료");
+  } catch (err) {
+    console.warn("[NST] Injector 주입 실패:", err);
+  }
 }
 
 function init() {
@@ -52,10 +60,12 @@ function init() {
     document.addEventListener("DOMContentLoaded", () => {
       setupOverlay();
       observeSubtitles();
+      observeNetflixNavigation();
     });
   } else {
     setupOverlay();
     observeSubtitles();
+    observeNetflixNavigation();
   }
 
   // injector에서 자막 발견 이벤트 수신 (추출만, 번역은 팝업에서 선택)
@@ -67,29 +77,7 @@ function init() {
     if (currentMovieId && currentMovieId !== movieId) {
       console.log("[NST] 영상 변경 감지:", currentMovieId, "→", movieId);
 
-      // 상태 업데이트 일시 무시
-      ignoreStatusUpdates = true;
-
-      // 이전 번역 취소 요청
-      chrome.runtime.sendMessage({
-        type: "NST_CANCEL_TRANSLATION",
-        movieId: movieId
-      }).catch(() => {});
-
-      // 로컬 상태 초기화
-      localTranslations.clear();
-      preTranslationStatus = "idle";
-      preTranslationProgress = { current: 0, total: 0 };
-
-      // UI 강제 숨김
-      hideOverlay();
-      hideStatusIndicator();
-
-      // 2초 후 상태 업데이트 다시 허용
-      setTimeout(() => {
-        ignoreStatusUpdates = false;
-        console.log("[NST] 영상 변경 리셋 완료");
-      }, 2000);
+      resetTranslationState(movieId, 1200);
     }
 
     // 자막 정보 저장 (번역은 하지 않음)
@@ -103,6 +91,11 @@ function init() {
     }
 
     console.log("[NST] 자막 추출 완료, 팝업에서 번역 시작 대기 중...");
+  });
+
+  window.addEventListener("NST_LOCATION_CHANGED", (event) => {
+    const nextWatchId = event.detail?.watchId || getWatchIdFromUrl();
+    handleWatchNavigation(nextWatchId, "injector");
   });
 
   // 메시지 리스너
@@ -154,21 +147,13 @@ function init() {
       ignoreStatusUpdates = true;
 
       // background에 취소 요청
-      chrome.runtime.sendMessage({
+      safeRuntimeSendMessage({
         type: "NST_CANCEL_TRANSLATION",
         movieId: "FORCE_RESET"
-      }).catch(() => {});
+      });
 
       // 로컬 상태 완전 초기화
-      localTranslations.clear();
-      availableSubtitles = [];
-      currentMovieId = null;
-      preTranslationStatus = "idle";
-      preTranslationProgress = { current: 0, total: 0 };
-
-      // UI 강제 숨김
-      hideOverlay();
-      hideStatusIndicator();
+      clearLocalTranslationState(true);
 
       // 3초 후 상태 업데이트 다시 허용
       setTimeout(() => {
@@ -207,7 +192,7 @@ function init() {
         console.log("[NST] subtitleUrl:", subtitle.url?.substring(0, 100));
         console.log("[NST] movieId:", currentMovieId);
 
-        chrome.runtime.sendMessage({
+        safeRuntimeSendMessage({
           type: PROCESS_SUBTITLES,
           movieId: currentMovieId,
           subtitleUrl: subtitle.url,
@@ -226,11 +211,73 @@ function init() {
 }
 
 function loadSettings() {
-  chrome.storage.sync.get(["nstEnabled"], (result) => {
-    if (typeof result.nstEnabled === "boolean") {
-      isEnabled = result.nstEnabled;
-    }
+  try {
+    chrome.storage.sync.get(["nstEnabled"], (result) => {
+      if (typeof result.nstEnabled === "boolean") {
+        isEnabled = result.nstEnabled;
+      }
+    });
+  } catch (err) {
+    console.warn("[NST] 설정 로드 실패:", err);
+  }
+}
+
+// ============================================
+// Netflix SPA 영상 전환 감지
+// ============================================
+function observeNetflixNavigation() {
+  window.addEventListener("popstate", () => {
+    handleWatchNavigation(getWatchIdFromUrl(), "popstate");
   });
+
+  setInterval(() => {
+    handleWatchNavigation(getWatchIdFromUrl(), "poll");
+  }, 1000);
+}
+
+function handleWatchNavigation(nextWatchId, reason) {
+  if (!nextWatchId || nextWatchId === currentWatchId) return;
+
+  console.log("[NST] Netflix 영상 URL 변경 감지:", currentWatchId, "→", nextWatchId, reason);
+  currentWatchId = nextWatchId;
+  resetTranslationState(nextWatchId, 1200);
+}
+
+function resetTranslationState(nextMovieId, ignoreMs) {
+  ignoreStatusUpdates = true;
+
+  safeRuntimeSendMessage({
+    type: "NST_CANCEL_TRANSLATION",
+    movieId: nextMovieId
+  });
+
+  clearLocalTranslationState(true);
+
+  if (resetTimer) {
+    clearTimeout(resetTimer);
+  }
+
+  resetTimer = setTimeout(() => {
+    ignoreStatusUpdates = false;
+    resetTimer = null;
+    console.log("[NST] 영상 전환 리셋 완료");
+  }, ignoreMs);
+}
+
+function clearLocalTranslationState(clearMovieId) {
+  localTranslations.clear();
+  availableSubtitles = [];
+  if (clearMovieId) currentMovieId = null;
+  lastSubtitleText = "";
+  preTranslationStatus = "idle";
+  preTranslationProgress = { current: 0, total: 0 };
+  hideOverlay();
+  hideStatusIndicator();
+}
+
+function getWatchIdFromUrl() {
+  const match = location.pathname.match(/\/watch\/(\d+)/);
+  return match?.[1] || null;
 }
 
 // ============================================
@@ -444,24 +491,49 @@ function requestTranslation(text) {
   }
 
   // 로컬에 없으면 background에 요청 (service worker가 살아있을 때)
-  chrome.runtime.sendMessage(
-    { type: GET_TRANSLATION, text },
-    (response) => {
-      if (chrome.runtime.lastError) {
-        // service worker 종료됨 - 로컬 데이터만 사용
-        console.log("[NST] service worker 종료됨");
-        return;
-      }
-
-      if (response?.translated) {
-        // 로컬에도 저장
-        localTranslations.set(text, response.translated);
-        console.log("[NST] background 번역 수신:", text.substring(0, 20), "→", response.translated.substring(0, 20));
-        showOverlay(response.translated);
-      } else {
-        // 번역 없음 - 오버레이 숨기지 않음 (번역 중일 수 있음)
-        console.log("[NST] 번역 없음 (아직 번역 안됨):", text.substring(0, 20));
-      }
+  safeRuntimeSendMessage({ type: GET_TRANSLATION, text }, (response) => {
+    if (response?.translated) {
+      // 로컬에도 저장
+      localTranslations.set(text, response.translated);
+      console.log("[NST] background 번역 수신:", text.substring(0, 20), "→", response.translated.substring(0, 20));
+      showOverlay(response.translated);
+    } else {
+      // 번역 없음 - 오버레이 숨기지 않음 (번역 중일 수 있음)
+      console.log("[NST] 번역 없음 (아직 번역 안됨):", text.substring(0, 20));
     }
-  );
+  });
+}
+
+function safeRuntimeSendMessage(message, callback = null) {
+  try {
+    if (!isExtensionContextReady()) {
+      console.warn("[NST] 확장 컨텍스트가 무효화됨. Netflix 탭을 새로고침하세요.");
+      return Promise.resolve(null);
+    }
+
+    if (callback) {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+          console.warn("[NST] runtime 메시지 실패:", chrome.runtime.lastError.message);
+          callback(null);
+          return;
+        }
+
+        callback(response);
+      });
+      return Promise.resolve(null);
+    }
+
+    return chrome.runtime.sendMessage(message).catch((err) => {
+      console.warn("[NST] runtime 메시지 실패:", err);
+      return null;
+    });
+  } catch (err) {
+    console.warn("[NST] runtime 메시지 전송 중단:", err);
+    return Promise.resolve(null);
+  }
+}
+
+function isExtensionContextReady() {
+  return typeof chrome !== "undefined" && !!chrome.runtime?.id;
 }

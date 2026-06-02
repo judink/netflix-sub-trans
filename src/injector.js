@@ -2,6 +2,12 @@
 // Netflix 페이지에 주입되어 JSON.parse/stringify를 후킹하여 자막 URL을 추출
 
 (function() {
+  if (window.__NST_INJECTOR_INSTALLED) {
+    console.log("[NST] Injector 이미 설치됨");
+    return;
+  }
+
+  window.__NST_INJECTOR_INSTALLED = true;
   console.log("[NST] Injector 로드됨");
 
   // 자막 데이터 저장용 숨겨진 요소 생성
@@ -14,6 +20,22 @@
 
   const originalStringify = JSON.stringify;
   const originalParse = JSON.parse;
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+
+  history.pushState = function() {
+    const result = originalPushState.apply(this, arguments);
+    notifyLocationChanged();
+    return result;
+  };
+
+  history.replaceState = function() {
+    const result = originalReplaceState.apply(this, arguments);
+    notifyLocationChanged();
+    return result;
+  };
+
+  window.addEventListener("popstate", notifyLocationChanged);
 
   // JSON.stringify 후킹: webvtt 프로필 추가
   JSON.stringify = function(value) {
@@ -56,10 +78,12 @@
     const container = document.getElementById("NST_SUBTITLE_DATA");
     if (!container) return;
 
-    // 이미 처리된 영화인지 확인
-    if (container.querySelector(`.movie-${movieId}`)) return;
-
     console.log("[NST] 자막 정보 추출 시작:", movieId);
+
+    const previousElem = container.querySelector(`[data-movie-id="${movieId}"]`);
+    if (previousElem) {
+      previousElem.remove();
+    }
 
     const movieElem = document.createElement("div");
     movieElem.className = `movie-${movieId}`;
@@ -104,5 +128,39 @@
     }));
 
     console.log(`[NST] 총 ${subtitles.length}개 자막 트랙 발견`);
+  }
+
+  function notifyLocationChanged() {
+    setTimeout(() => {
+      const watchId = getWatchIdFromUrl();
+      window.dispatchEvent(new CustomEvent("NST_LOCATION_CHANGED", {
+        detail: { watchId, href: location.href }
+      }));
+
+      if (watchId) {
+        dispatchStoredSubtitleInfo(watchId);
+      }
+    }, 0);
+  }
+
+  function dispatchStoredSubtitleInfo(movieId) {
+    const container = document.getElementById("NST_SUBTITLE_DATA");
+    const movieElem = container?.querySelector(`[data-movie-id="${movieId}"]`);
+    if (!movieElem?.dataset.subtitles) return;
+
+    try {
+      const subtitles = JSON.parse(movieElem.dataset.subtitles);
+      window.dispatchEvent(new CustomEvent("NST_SUBTITLES_FOUND", {
+        detail: { movieId, subtitles }
+      }));
+      console.log("[NST] 저장된 자막 정보 재전송:", movieId, subtitles.length + "개");
+    } catch (err) {
+      console.warn("[NST] 저장된 자막 정보 재전송 실패:", err);
+    }
+  }
+
+  function getWatchIdFromUrl() {
+    const match = location.pathname.match(/\/watch\/(\d+)/);
+    return match?.[1] || null;
   }
 })();
