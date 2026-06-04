@@ -17,15 +17,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   // 설정 로드
   const settings = await chrome.storage.sync.get(["nstEnabled", "geminiApiKey", "targetLanguage"]);
   const targetLang = settings.targetLanguage || "uk";
+  const hasApiKey = !!settings.geminiApiKey;
   enableToggle.checked = settings.nstEnabled !== false;
-
-  // API 키 체크
-  if (!settings.geminiApiKey) {
-    statusDot.className = "status-dot error";
-    statusText.textContent = "API 키가 설정되지 않음";
-    subtitleList.innerHTML = '<div class="no-subtitles">먼저 설정에서 API 키를 입력하세요</div>';
-    return;
-  }
 
   // 현재 탭 가져오기
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -46,7 +39,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     if (response && response.subtitles && response.subtitles.length > 0) {
       currentMovieId = response.movieId;
       await renderSubtitles(response.subtitles, targetLang, response.movieId);
-      updateStatus(response.status, response.progress);
+      updateStatus(response.status, response.progress, response.error);
     } else {
       subtitleList.innerHTML = '<div class="no-subtitles">영상을 재생하면 자막이 표시됩니다</div>';
       statusDot.className = "status-dot";
@@ -67,9 +60,14 @@ document.addEventListener("DOMContentLoaded", async () => {
       ru: "러시아어", es: "스페인어", fr: "프랑스어", de: "독일어", zh: "중국어"
     };
 
+    const preferredSubtitle = chooseDefaultSubtitle(subtitles, targetLang);
+    const existingTargetSubtitle = subtitles.find(sub => sub.langCode === targetLang && sub.url);
+
     for (const sub of subtitles) {
+      const isSameAsTarget = sub.langCode === targetLang;
+      const canUseExistingTarget = !!existingTargetSubtitle && !isSameAsTarget;
       const item = document.createElement("div");
-      item.className = "subtitle-item";
+      item.className = isSameAsTarget ? "subtitle-item same-target" : "subtitle-item";
       item.dataset.langCode = sub.langCode;
 
       // 캐시 상태 확인
@@ -91,12 +89,20 @@ document.addEventListener("DOMContentLoaded", async () => {
         statusBadge = '<span class="cache-badge complete">완료</span>';
       } else if (cacheStatus.exists && cacheStatus.progress > 0) {
         statusBadge = `<span class="cache-badge partial">${cacheStatus.progress}%</span>`;
+      } else if (isSameAsTarget) {
+        statusBadge = '<span class="cache-badge same">대상언어</span>';
       }
 
       item.innerHTML = `
         <div>
           <div class="subtitle-name">${sub.langName} ${statusBadge}</div>
-          <div class="target-lang">→ ${targetLangNames[targetLang] || targetLang}로 번역</div>
+          <div class="target-lang">${
+            isSameAsTarget
+              ? "이미 대상 언어"
+              : canUseExistingTarget
+                ? `→ ${targetLangNames[targetLang] || targetLang} 자막 표시`
+                : `→ ${targetLangNames[targetLang] || targetLang}로 번역`
+          }</div>
         </div>
         <span class="subtitle-code">${sub.langCode}</span>
       `;
@@ -105,13 +111,19 @@ document.addEventListener("DOMContentLoaded", async () => {
         document.querySelectorAll(".subtitle-item").forEach(el => el.classList.remove("selected"));
         item.classList.add("selected");
         selectedLangCode = sub.langCode;
-        translateBtn.disabled = false;
+        translateBtn.disabled = !hasApiKey && !isSameAsTarget && !canUseExistingTarget && !cacheStatus.completed;
 
         // 완료된 캐시면 버튼 텍스트 변경
         if (cacheStatus.completed) {
           translateBtn.textContent = "번역 불러오기";
+        } else if (isSameAsTarget) {
+          translateBtn.textContent = "그대로 표시";
+        } else if (canUseExistingTarget) {
+          translateBtn.textContent = "이중자막 표시";
         } else if (cacheStatus.exists && cacheStatus.progress > 0) {
           translateBtn.textContent = `이어서 번역 (${cacheStatus.progress}%)`;
+        } else if (!hasApiKey) {
+          translateBtn.textContent = "API 키 필요";
         } else {
           translateBtn.textContent = "번역 시작";
         }
@@ -120,16 +132,36 @@ document.addEventListener("DOMContentLoaded", async () => {
       subtitleList.appendChild(item);
     }
 
-    // 첫 번째 자막 자동 선택
-    if (subtitles.length > 0) {
-      const firstItem = subtitleList.querySelector(".subtitle-item");
-      firstItem.click();
+    // 대상 언어와 다른 트랙을 우선 선택한다. 한국어/영어가 있으면 더 선호한다.
+    if (preferredSubtitle) {
+      const selectedItem = subtitleList.querySelector(`[data-lang-code="${preferredSubtitle.langCode}"]`);
+      selectedItem?.click();
     }
   }
 
-  function updateStatus(status, progress) {
+  function chooseDefaultSubtitle(subtitles, targetLang) {
+    const candidates = subtitles.filter(sub => sub.langCode !== targetLang);
+    const pool = candidates.length > 0 ? candidates : subtitles;
+    const preference = ["ko", "en", "ja", "zh", "es", "fr", "de", "ru"];
+
+    for (const langCode of preference) {
+      const found = pool.find(sub => sub.langCode === langCode);
+      if (found) return found;
+    }
+
+    return pool[0] || null;
+  }
+
+  function updateStatus(status, progress, error = "") {
     if (status === "loading") {
       statusDot.className = "status-dot loading";
+      if (!progress || progress.total <= 1) {
+        statusText.textContent = "자막 가져오는 중...";
+        translateBtn.disabled = true;
+        translateBtn.textContent = "자막 가져오는 중...";
+        return;
+      }
+
       const percent = progress && progress.total > 0
         ? Math.round((progress.current / progress.total) * 100)
         : 0;
@@ -143,7 +175,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       translateBtn.disabled = false;
     } else if (status === "error") {
       statusDot.className = "status-dot error";
-      statusText.textContent = "번역 실패";
+      statusText.textContent = error || "번역 실패";
       translateBtn.disabled = false;
       translateBtn.textContent = "다시 시도";
     } else {
@@ -198,7 +230,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     try {
       const response = await chrome.tabs.sendMessage(currentTabId, { type: GET_AVAILABLE_SUBTITLES });
       if (response) {
-        updateStatus(response.status, response.progress);
+        updateStatus(response.status, response.progress, response.error);
       }
     } catch (err) {
       // 무시

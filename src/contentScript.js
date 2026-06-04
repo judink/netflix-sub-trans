@@ -1,11 +1,17 @@
 // contentScript.js
 // injector.js 주입 → 자막 URL 수신 → background에 번역 요청 → 오버레이 표시
 
+if (window.__NST_CONTENT_SCRIPT_INSTALLED) {
+  console.log("[NST] Content script 이미 설치됨");
+} else {
+  window.__NST_CONTENT_SCRIPT_INSTALLED = true;
+
 const GET_TRANSLATION = "NST_GET_TRANSLATION";
 const SUBTITLE_STATUS = "NST_SUBTITLE_STATUS";
 const PROCESS_SUBTITLES = "NST_PROCESS_SUBTITLES";
 const GET_AVAILABLE_SUBTITLES = "NST_GET_AVAILABLE_SUBTITLES";
 const START_TRANSLATION = "NST_START_TRANSLATION";
+const GET_TRANSLATION_STATUS = "NST_GET_TRANSLATION_STATUS";
 
 let overlayRoot = null;
 let overlayContainer = null;
@@ -16,15 +22,19 @@ let lastSubtitleText = "";
 // 상태
 let preTranslationStatus = "idle";
 let preTranslationProgress = { current: 0, total: 0 };
+let preTranslationError = "";
 
 // 발견된 자막 저장 (자동 번역 안함)
 let availableSubtitles = [];
 let currentMovieId = null;
 let currentWatchId = getWatchIdFromUrl();
 let resetTimer = null;
+let activeTranslationLangCode = null;
+let statusPollTimer = null;
 
 // 번역 데이터 로컬 저장 (service worker 종료 대비)
 let localTranslations = new Map();
+let localNormalizedTranslations = new Map();
 
 // 리셋 후 상태 업데이트 무시 플래그
 let ignoreStatusUpdates = false;
@@ -109,7 +119,11 @@ function init() {
       }
       preTranslationStatus = message.status;
       if (message.progress) preTranslationProgress = message.progress;
-      updateStatusIndicator();
+      if (message.error) preTranslationError = message.error;
+      updateStatusIndicator(message.error || "");
+      if (message.status === "ready" || message.status === "error") {
+        stopTranslationStatusPolling();
+      }
       sendResponse?.({ ok: true });
       return true;
     }
@@ -121,6 +135,7 @@ function init() {
         // 리셋 중이 아닐 때만 저장
         if (!ignoreStatusUpdates) {
           localTranslations = new Map(Object.entries(translations));
+          localNormalizedTranslations = buildNormalizedTranslationMap(localTranslations);
           console.log("[NST] 번역 데이터 로컬 저장:", localTranslations.size + "개");
         } else {
           console.log("[NST] 번역 데이터 무시 (리셋 중)");
@@ -171,7 +186,8 @@ function init() {
         movieId: currentMovieId,
         subtitles: availableSubtitles,
         status: preTranslationStatus,
-        progress: preTranslationProgress
+        progress: preTranslationProgress,
+        error: preTranslationError
       });
       return true;
     }
@@ -192,11 +208,26 @@ function init() {
         console.log("[NST] subtitleUrl:", subtitle.url?.substring(0, 100));
         console.log("[NST] movieId:", currentMovieId);
 
+        preTranslationStatus = "loading";
+        preTranslationProgress = { current: 0, total: 0 };
+        preTranslationError = "";
+        activeTranslationLangCode = subtitle.langCode;
+        updateStatusIndicator();
+        startTranslationStatusPolling();
+
         safeRuntimeSendMessage({
           type: PROCESS_SUBTITLES,
           movieId: currentMovieId,
           subtitleUrl: subtitle.url,
-          langCode: subtitle.langCode
+          langCode: subtitle.langCode,
+          subtitles: availableSubtitles
+        }, (response) => {
+          console.log("[NST] background 번역 시작 응답:", response);
+          if (response && response.ok === false) {
+            preTranslationStatus = "error";
+            updateStatusIndicator();
+            stopTranslationStatusPolling();
+          }
         });
         sendResponse({ ok: true });
       } else {
@@ -266,11 +297,15 @@ function resetTranslationState(nextMovieId, ignoreMs) {
 
 function clearLocalTranslationState(clearMovieId) {
   localTranslations.clear();
+  localNormalizedTranslations.clear();
   availableSubtitles = [];
   if (clearMovieId) currentMovieId = null;
+  activeTranslationLangCode = null;
+  stopTranslationStatusPolling();
   lastSubtitleText = "";
   preTranslationStatus = "idle";
   preTranslationProgress = { current: 0, total: 0 };
+  preTranslationError = "";
   hideOverlay();
   hideStatusIndicator();
 }
@@ -278,6 +313,57 @@ function clearLocalTranslationState(clearMovieId) {
 function getWatchIdFromUrl() {
   const match = location.pathname.match(/\/watch\/(\d+)/);
   return match?.[1] || null;
+}
+
+function startTranslationStatusPolling() {
+  stopTranslationStatusPolling();
+
+  statusPollTimer = setInterval(() => {
+    if (!currentMovieId || !activeTranslationLangCode || preTranslationStatus !== "loading") {
+      stopTranslationStatusPolling();
+      return;
+    }
+
+    safeRuntimeSendMessage({
+      type: GET_TRANSLATION_STATUS,
+      movieId: currentMovieId,
+      langCode: activeTranslationLangCode
+    }, (status) => {
+      if (!status || status.status === "idle") return;
+
+      console.log("[NST] background 작업 상태:", JSON.stringify(status));
+
+      if (status.status === "error") {
+        preTranslationStatus = "error";
+        preTranslationError = status.error || "번역 실패";
+        updateStatusIndicator(status.error || "번역 실패");
+        stopTranslationStatusPolling();
+        return;
+      }
+
+      if (status.status === "ready") {
+        preTranslationStatus = "ready";
+        updateStatusIndicator();
+        stopTranslationStatusPolling();
+        return;
+      }
+
+      preTranslationStatus = "loading";
+      if (Number.isFinite(status.current) && Number.isFinite(status.total)) {
+        preTranslationProgress = {
+          current: status.current,
+          total: status.total
+        };
+      }
+      updateStatusIndicator(status.message);
+    });
+  }, 1500);
+}
+
+function stopTranslationStatusPolling() {
+  if (!statusPollTimer) return;
+  clearInterval(statusPollTimer);
+  statusPollTimer = null;
 }
 
 // ============================================
@@ -352,7 +438,7 @@ function setupOverlay() {
 // ============================================
 // 상태 표시기 업데이트
 // ============================================
-function updateStatusIndicator() {
+function updateStatusIndicator(customMessage = "") {
   if (!statusIndicator) return;
 
   // 리셋 중이면 무조건 숨김
@@ -362,10 +448,16 @@ function updateStatusIndicator() {
   }
 
   if (preTranslationStatus === "loading") {
+    if (preTranslationProgress.total <= 1) {
+      statusIndicator.textContent = customMessage || "자막 가져오는 중...";
+      statusIndicator.className = "nst-status";
+      return;
+    }
+
     const percent = preTranslationProgress.total > 0
       ? Math.round((preTranslationProgress.current / preTranslationProgress.total) * 100)
       : 0;
-    statusIndicator.textContent = `번역 준비 중... ${percent}%`;
+    statusIndicator.textContent = customMessage || `번역 준비 중... ${percent}%`;
     statusIndicator.className = "nst-status";
   } else if (preTranslationStatus === "ready") {
     statusIndicator.textContent = "번역 준비 완료 ✓";
@@ -376,7 +468,7 @@ function updateStatusIndicator() {
       }
     }, 3000);
   } else if (preTranslationStatus === "error") {
-    statusIndicator.textContent = "번역 준비 실패";
+    statusIndicator.textContent = customMessage || "번역 준비 실패";
     statusIndicator.className = "nst-status error";
   } else {
     statusIndicator.className = "nst-status nst-hidden";
@@ -401,7 +493,7 @@ function showOverlay(text) {
 
   const textEl = document.createElement("div");
   textEl.className = "nst-text";
-  textEl.textContent = text;
+  textEl.textContent = cleanSubtitleDisplayText(text);
   overlayContainer.appendChild(textEl);
 }
 
@@ -490,18 +582,67 @@ function requestTranslation(text) {
     return;
   }
 
+  const normalizedText = normalizeSubtitleText(text);
+  if (localNormalizedTranslations.has(normalizedText)) {
+    const translated = localNormalizedTranslations.get(normalizedText);
+    console.log("[NST] 정규화 번역 발견:", text.substring(0, 20), "→", translated.substring(0, 20));
+    showOverlay(translated);
+    return;
+  }
+
   // 로컬에 없으면 background에 요청 (service worker가 살아있을 때)
   safeRuntimeSendMessage({ type: GET_TRANSLATION, text }, (response) => {
     if (response?.translated) {
       // 로컬에도 저장
       localTranslations.set(text, response.translated);
+      localNormalizedTranslations.set(normalizeSubtitleText(text), response.translated);
       console.log("[NST] background 번역 수신:", text.substring(0, 20), "→", response.translated.substring(0, 20));
       showOverlay(response.translated);
     } else {
       // 번역 없음 - 오버레이 숨기지 않음 (번역 중일 수 있음)
-      console.log("[NST] 번역 없음 (아직 번역 안됨):", text.substring(0, 20));
+      if (preTranslationStatus !== "loading") {
+        console.log("[NST] 번역 없음 (아직 번역 안됨):", text.substring(0, 20));
+      }
     }
   });
+}
+
+function buildNormalizedTranslationMap(translations) {
+  const normalized = new Map();
+
+  for (const [original, translated] of translations) {
+    normalized.set(normalizeSubtitleText(original), translated);
+  }
+
+  return normalized;
+}
+
+function normalizeSubtitleText(text) {
+  return cleanSubtitleDisplayText(text)
+    .normalize("NFKC")
+    .replace(/<[^>]*>/g, "")
+    .replace(/[“”„«»]/g, "\"")
+    .replace(/[‘’‚]/g, "'")
+    .replace(/[‐‑‒–—―]/g, "-")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function cleanSubtitleDisplayText(text) {
+  return String(text || "")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&lrm;|&#x200e;|&#8206;/gi, "")
+    .replace(/&rlm;|&#x200f;|&#8207;/gi, "")
+    .replace(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function safeRuntimeSendMessage(message, callback = null) {
@@ -536,4 +677,6 @@ function safeRuntimeSendMessage(message, callback = null) {
 
 function isExtensionContextReady() {
   return typeof chrome !== "undefined" && !!chrome.runtime?.id;
+}
+
 }
